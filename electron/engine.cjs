@@ -94,6 +94,48 @@ class ZapretEngine {
     })
   }
 
+  runStrategyScript(scriptPath) {
+    return new Promise((resolve) => {
+      const logPath = path.join(this.root, 'manager-launch.log')
+      const command = `call "${scriptPath}" > "${logPath}" 2>&1`
+      const child = spawn('cmd.exe', ['/d', '/q', '/c', command], {
+        cwd: this.root,
+        windowsHide: true,
+        env: { ...process.env, NO_UPDATE_CHECK: '1' },
+        stdio: 'ignore',
+      })
+      let settled = false
+      const finish = async (result) => {
+        if (settled) return
+        settled = true
+        let output = ''
+        try { output = (await fs.readFile(logPath, 'utf8')).slice(-12000) } catch { /* The log is best-effort. */ }
+        resolve({ ...result, output })
+      }
+      const timeout = setTimeout(() => {
+        if (child.pid) spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+        finish({ code: null, timedOut: true })
+      }, 15000)
+      child.once('error', (error) => {
+        clearTimeout(timeout)
+        finish({ code: -1, timedOut: false, spawnError: error.message })
+      })
+      child.once('exit', (code) => {
+        clearTimeout(timeout)
+        finish({ code, timedOut: false })
+      })
+    })
+  }
+
+  async waitForRunning(expected, timeout = 8000) {
+    const deadline = Date.now() + timeout
+    while (Date.now() < deadline) {
+      if ((await this.isRunning()) === expected) return true
+      await sleep(250)
+    }
+    return false
+  }
+
   async expandZip(archive, destination) {
     const quote = (value) => `'${value.replace(/'/g, "''")}'`
     const script = `Expand-Archive -LiteralPath ${quote(archive)} -DestinationPath ${quote(destination)} -Force`
@@ -103,11 +145,8 @@ class ZapretEngine {
 
   async isRunning() {
     if (!this.isWindows) return this.demoRunning
-    try {
-      await this.run('tasklist.exe', ['/FI', 'IMAGENAME eq winws.exe', '/NH'])
-      const { execFile } = require('node:child_process')
-      return await new Promise((resolve) => execFile('tasklist.exe', ['/FI', 'IMAGENAME eq winws.exe', '/NH'], (error, stdout) => resolve(!error && /winws\.exe/i.test(stdout))))
-    } catch { return false }
+    const { execFile } = require('node:child_process')
+    return new Promise((resolve) => execFile('tasklist.exe', ['/FI', 'IMAGENAME eq winws.exe', '/NH'], (error, stdout) => resolve(!error && /winws\.exe/i.test(stdout))))
   }
 
   async snapshot(includeRelease = true) {
@@ -120,14 +159,16 @@ class ZapretEngine {
       } catch { /* Offline is a valid state. */ }
     }
     const strategies = await this.listStrategies()
+    const running = await this.isRunning()
     return {
       platform: process.platform,
       demoMode: !this.isWindows,
       installed: !this.isWindows || fsSync.existsSync(path.join(this.root, 'bin', 'winws.exe')),
-      running: await this.isRunning(),
+      running,
       version: !this.isWindows ? '1.10.3' : state.version || null,
       latestVersion,
-      activeStrategy: !this.isWindows ? this.demoStrategy : state.activeStrategy || null,
+      activeStrategy: !this.isWindows ? this.demoStrategy : running ? state.activeStrategy || null : null,
+      enginePath: this.root,
       strategies,
       services: [],
       lastChecked: new Date().toISOString(),
@@ -179,6 +220,7 @@ class ZapretEngine {
       this.run('taskkill.exe', ['/F', '/IM', 'winws.exe']),
       this.run('sc.exe', ['stop', 'zapret']),
     ])
+    await this.waitForRunning(false, 4000)
     await this.writeState({ activeStrategy: null })
     await sleep(350)
     return this.snapshot(false)
@@ -194,14 +236,16 @@ class ZapretEngine {
       this.demoStrategy = selected
       return this.snapshot(false)
     }
-    if (!fsSync.existsSync(path.join(this.root, this.strategyFile(selected)))) throw new Error('Файл конфига отсутствует')
+    const scriptPath = path.join(this.root, this.strategyFile(selected))
+    if (!fsSync.existsSync(scriptPath)) throw new Error(`Файл конфига отсутствует: ${scriptPath}`)
     await this.stop()
-    const child = spawn('cmd.exe', ['/d', '/s', '/c', this.strategyFile(selected)], {
-      cwd: this.root, windowsHide: true, detached: true, stdio: 'ignore',
-    })
-    child.unref()
+    const result = await this.runStrategyScript(scriptPath)
+    const running = await this.waitForRunning(true)
+    if (!running) {
+      const details = `${result.output}${result.spawnError ? `\n${result.spawnError}` : ''}`.replace(/\r/g, '').split('\n').filter(Boolean).slice(-6).join(' · ')
+      throw new Error(`Конфиг ${selected} не запустил winws.exe${details ? `: ${details}` : result.timedOut ? ': BAT-файл не завершился за 15 секунд' : `: cmd завершился с кодом ${result.code}`}`)
+    }
     await this.writeState({ activeStrategy: selected })
-    await sleep(900)
     return this.snapshot(false)
   }
 
@@ -266,7 +310,13 @@ class ZapretEngine {
         return progress
       }
       this.sendProgress({ index: index + 1, total: strategies.length, strategy, phase: 'starting' })
-      await this.start(strategy)
+      try {
+        await this.start(strategy)
+      } catch (error) {
+        results.push({ strategy, score: 0, reachable: 0, averageLatency: null, error: error.message })
+        this.sendProgress({ index: index + 1, total: strategies.length, strategy, phase: 'testing', score: 0, message: error.message })
+        continue
+      }
       await sleep(this.isWindows ? 1800 : 350)
       this.sendProgress({ index: index + 1, total: strategies.length, strategy, phase: 'testing' })
       const probes = await this.probeServices()
@@ -279,7 +329,7 @@ class ZapretEngine {
       this.sendProgress({ index: index + 1, total: strategies.length, strategy, phase: 'testing', score })
     }
     results.sort((a, b) => b.score - a.score || (a.averageLatency ?? Infinity) - (b.averageLatency ?? Infinity))
-    const bestStrategy = results[0]?.strategy
+    const bestStrategy = results[0]?.score > 0 ? results[0].strategy : null
     if (bestStrategy) await this.start(bestStrategy)
     const progress = { index: strategies.length, total: strategies.length, strategy: bestStrategy, phase: 'complete', bestStrategy, results }
     this.sendProgress(progress)

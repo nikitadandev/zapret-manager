@@ -39,6 +39,7 @@ function createWindow() {
 app.whenReady().then(() => {
   engine = new ZapretEngine(app.getPath('userData'), (progress) => mainWindow?.webContents.send('manager:tune-progress', progress))
   ipcMain.handle('manager:snapshot', () => engine.snapshot())
+  ipcMain.handle('manager:status', () => engine.snapshot(false))
   ipcMain.handle('manager:probe', () => engine.probeServices())
   ipcMain.handle('manager:start', (_event, strategy) => engine.start(strategy))
   ipcMain.handle('manager:stop', () => engine.stop())
@@ -72,6 +73,12 @@ app.whenReady().then(() => {
     if (!app.isPackaged) return false
     setImmediate(() => autoUpdater.quitAndInstall(false, true))
     return true
+  })
+  ipcMain.handle('manager:open-engine-folder', async () => {
+    await require('node:fs/promises').mkdir(engine.root, { recursive: true })
+    const error = await shell.openPath(engine.root)
+    if (error) throw new Error(error)
+    return engine.root
   })
   ipcMain.handle('manager:open-external', (_event, url) => {
     if (!/^https:\/\/(github\.com|zapret\.info)\//.test(url)) throw new Error('Недопустимая ссылка')

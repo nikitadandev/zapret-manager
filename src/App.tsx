@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, ArrowDownToLine, Check, ChevronDown, CircleHelp, ExternalLink,
-  Gauge, Github, LoaderCircle, Play, Power, RefreshCw, RotateCcw, Search,
+  FolderOpen, Gauge, Github, LoaderCircle, Play, Power, RefreshCw, RotateCcw, Search,
   Settings, ShieldCheck, Sparkles, Square, WandSparkles, Wifi, X, Zap,
 } from 'lucide-react'
 import { averageLatency as getAverageLatency } from './utils'
@@ -17,7 +17,7 @@ const defaultSnapshot: AppSnapshot = {
   platform: 'web', demoMode: true, installed: true, running: true,
   version: '1.10.3', latestVersion: '1.10.3', activeStrategy: 'General ALT 7',
   strategies: ['General', ...Array.from({ length: 13 }, (_, i) => `General ALT ${i + 1}`)],
-  services: demoServices, lastChecked: new Date().toISOString(),
+  services: demoServices, lastChecked: new Date().toISOString(), enginePath: 'C:\\Users\\User\\AppData\\Roaming\\zapret-manager\\flowseal',
 }
 
 function localApi(): ManagerApi {
@@ -27,6 +27,7 @@ function localApi(): ManagerApi {
   const snapshot = () => Promise.resolve({ ...defaultSnapshot, running, activeStrategy: strategy })
   return {
     snapshot,
+    status: snapshot,
     probe: async () => { await wait(500); return demoServices.map((item) => ({ ...item, latency: (item.latency || 40) + Math.round(Math.random() * 7) })) },
     start: async (next) => { await wait(450); running = true; strategy = next || strategy; return snapshot() },
     stop: async () => { await wait(450); running = false; return snapshot() },
@@ -38,6 +39,7 @@ function localApi(): ManagerApi {
     checkManagerUpdate: async () => ({ currentVersion: __APP_VERSION__, latestVersion: __APP_VERSION__, available: false, developmentMode: true }),
     downloadManagerUpdate: async () => ({ currentVersion: __APP_VERSION__, latestVersion: __APP_VERSION__, available: false, downloaded: true }),
     installManagerUpdate: async () => true,
+    openEngineFolder: async () => defaultSnapshot.enginePath,
     openExternal: async (url) => { window.open(url, '_blank', 'noopener,noreferrer') },
     onTuneProgress: () => () => undefined,
     onStateChanged: () => () => undefined,
@@ -89,6 +91,14 @@ function App() {
   useEffect(() => api.onTuneProgress((progress) => setTune(progress)), [])
 
   useEffect(() => api.onStateChanged((value) => setSnapshot((current) => ({ ...value, services: current.services }))), [])
+
+  useEffect(() => {
+    const refreshStatus = () => api.status().then((value) => {
+      setSnapshot((current) => ({ ...value, services: current.services, latestVersion: current.latestVersion || value.latestVersion }))
+    }).catch(() => undefined)
+    const timer = window.setInterval(refreshStatus, 4000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   useEffect(() => {
     api.getSettings().then((settings) => {
@@ -332,6 +342,7 @@ function App() {
               <Toggle label="Фоновая диагностика" description="Проверять сервисы каждые 30 секунд" value={backgroundCheck} onChange={(value) => changeSetting('backgroundCheck', value)} />
             </div>
             <div className="source-card"><ShieldCheck /><div><strong>Безопасный источник</strong><span>Ядро загружается только из официального репозитория Flowseal и проверяется по SHA-256.</span></div></div>
+            <button className="panel-link engine-folder" onClick={() => api.openEngineFolder()} title={snapshot.enginePath}><FolderOpen /> Открыть папку Zapret <span>{snapshot.enginePath}</span></button>
             <button className="panel-link" onClick={() => api.openExternal('https://github.com/Flowseal/zapret-discord-youtube/')}><Github /> Открыть репозиторий <ExternalLink /></button>
           </section>
         </div>

@@ -24,6 +24,7 @@ interface AppSnapshot {
   strategies: string[]
   services: ServiceProbe[]
   lastChecked: string
+  enginePath: string
 }
 
 interface TuneProgress {
@@ -53,6 +54,7 @@ interface ManagerUpdateInfo {
 
 interface ManagerApi {
   snapshot: () => Promise<AppSnapshot>
+  status: () => Promise<AppSnapshot>
   probe: () => Promise<ServiceProbe[]>
   start: (strategy?: string) => Promise<AppSnapshot>
   stop: () => Promise<AppSnapshot>
@@ -64,6 +66,7 @@ interface ManagerApi {
   checkManagerUpdate: () => Promise<ManagerUpdateInfo>
   downloadManagerUpdate: () => Promise<ManagerUpdateInfo>
   installManagerUpdate: () => Promise<boolean>
+  openEngineFolder: () => Promise<string>
   openExternal: (url: string) => Promise<void>
   onTuneProgress: (callback: (progress: TuneProgress) => void) => () => void
   onStateChanged: (callback: (snapshot: AppSnapshot) => void) => () => void

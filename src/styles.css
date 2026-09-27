@@ -273,6 +273,9 @@ footer svg:last-child { width: 9px; }
 .panel-link:hover { color: var(--text); background: var(--surface-hover); }
 .panel-link svg { width: 16px; }
 .panel-link svg:last-child { width: 12px; margin-left: auto; }
+.panel-link.engine-folder { margin-top: 14px; }
+.panel-link.engine-folder > span { min-width: 0; margin-left: auto; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 8px; }
+.panel-link.engine-folder svg:last-child { width: 16px; margin-left: 0; }
 
 .tune-overlay { inset: 0; align-items: center; justify-content: center; }
 .tune-dialog { width: min(510px, calc(100% - 32px)); padding: 36px; text-align: center; border-radius: 24px; background: #171b25; border: 1px solid rgba(255,255,255,.09); box-shadow: var(--shadow); animation: dialog-in 240ms cubic-bezier(.2,.8,.2,1); }

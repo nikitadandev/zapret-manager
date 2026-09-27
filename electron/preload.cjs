@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('zapretManager', {
   snapshot: () => ipcRenderer.invoke('manager:snapshot'),
+  status: () => ipcRenderer.invoke('manager:status'),
   probe: () => ipcRenderer.invoke('manager:probe'),
   start: (strategy) => ipcRenderer.invoke('manager:start', strategy),
   stop: () => ipcRenderer.invoke('manager:stop'),
@@ -13,6 +14,7 @@ contextBridge.exposeInMainWorld('zapretManager', {
   checkManagerUpdate: () => ipcRenderer.invoke('manager:check-app-update'),
   downloadManagerUpdate: () => ipcRenderer.invoke('manager:download-app-update'),
   installManagerUpdate: () => ipcRenderer.invoke('manager:install-app-update'),
+  openEngineFolder: () => ipcRenderer.invoke('manager:open-engine-folder'),
   openExternal: (url) => ipcRenderer.invoke('manager:open-external', url),
   onTuneProgress: (callback) => {
     const listener = (_event, value) => callback(value)
