@@ -1,6 +1,6 @@
 {
   "name": "zapret-manager",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": "Zapret Manager contributors",
   "private": true,
   "description": "A friendly Windows manager for Flowseal zapret-discord-youtube",

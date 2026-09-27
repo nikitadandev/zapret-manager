@@ -36,7 +36,7 @@ beforeEach(async () => {
     shell: { openExternal: vi.fn() },
   }
   vm.runInNewContext(fs.readFileSync(new URL('./main.cjs', import.meta.url), 'utf8'), {
-    require: (name) => name === 'electron' ? electron : name === 'electron-updater' ? { autoUpdater: updater } : name === './engine.cjs' ? { ZapretEngine: FakeEngine } : name === 'node:path' ? path.posix : require(name),
+    require: (name) => name === 'electron' ? electron : name === 'electron-updater' ? { autoUpdater: updater } : name === './engine.cjs' ? { ZapretEngine: FakeEngine } : name === 'node:path' ? path.posix : name === 'node:url' ? { pathToFileURL: () => new URL('file:///app/dist/index.html') } : require(name),
     __dirname: '/app/electron', process: { platform: 'win32', execPath: '/app/manager.exe' },
     console, setImmediate,
   })

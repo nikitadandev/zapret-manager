@@ -10,13 +10,14 @@ let directory, engine
 beforeEach(async () => {
   directory = await fs.mkdtemp(path.join(os.tmpdir(), 'zapret-test-'))
   engine = new ZapretEngine(directory)
+  Object.defineProperty(engine, 'isWindows', { value: false, configurable: true })
 })
 afterEach(async () => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
   await fs.rm(directory, { recursive: true, force: true })
 })
-const windows = () => Object.defineProperty(engine, 'isWindows', { value: true })
+const windows = () => Object.defineProperty(engine, 'isWindows', { value: true, configurable: true })
 
 describe('state and operation safety', () => {
   it('preserves concurrent settings and state writes', async () => {
