@@ -1,9 +1,14 @@
 const path = require('node:path')
 const { app, BrowserWindow, ipcMain, shell } = require('electron')
+const { autoUpdater } = require('electron-updater')
 const { ZapretEngine } = require('./engine.cjs')
 
 let mainWindow
 let engine
+let managerUpdateInfo = null
+
+autoUpdater.autoDownload = false
+autoUpdater.autoInstallOnAppQuit = true
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -48,6 +53,25 @@ app.whenReady().then(() => {
       app.setLoginItemSettings({ openAtLogin: settings.startWithWindows, path: process.execPath })
     }
     return settings
+  })
+  ipcMain.handle('manager:check-app-update', async () => {
+    if (!app.isPackaged) {
+      return { currentVersion: app.getVersion(), latestVersion: app.getVersion(), available: false, developmentMode: true }
+    }
+    const result = await autoUpdater.checkForUpdates()
+    managerUpdateInfo = result?.updateInfo || null
+    const latestVersion = managerUpdateInfo?.version || app.getVersion()
+    return { currentVersion: app.getVersion(), latestVersion, available: latestVersion !== app.getVersion() }
+  })
+  ipcMain.handle('manager:download-app-update', async () => {
+    if (!managerUpdateInfo) throw new Error('Сначала проверьте наличие обновления менеджера')
+    await autoUpdater.downloadUpdate()
+    return { currentVersion: app.getVersion(), latestVersion: managerUpdateInfo.version, available: true, downloaded: true }
+  })
+  ipcMain.handle('manager:install-app-update', () => {
+    if (!app.isPackaged) return false
+    setImmediate(() => autoUpdater.quitAndInstall(false, true))
+    return true
   })
   ipcMain.handle('manager:open-external', (_event, url) => {
     if (!/^https:\/\/(github\.com|zapret\.info)\//.test(url)) throw new Error('Недопустимая ссылка')

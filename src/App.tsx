@@ -35,6 +35,9 @@ function localApi(): ManagerApi {
     cancelTune: async () => true,
     getSettings: async () => ({ autoUpdate: true, startWithWindows: true, backgroundCheck: true }),
     updateSettings: async (settings) => ({ autoUpdate: true, startWithWindows: true, backgroundCheck: true, ...settings }),
+    checkManagerUpdate: async () => ({ currentVersion: __APP_VERSION__, latestVersion: __APP_VERSION__, available: false, developmentMode: true }),
+    downloadManagerUpdate: async () => ({ currentVersion: __APP_VERSION__, latestVersion: __APP_VERSION__, available: false, downloaded: true }),
+    installManagerUpdate: async () => true,
     openExternal: async (url) => { window.open(url, '_blank', 'noopener,noreferrer') },
     onTuneProgress: () => () => undefined,
     onStateChanged: () => () => undefined,
@@ -49,7 +52,7 @@ function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(defaultSnapshot)
   const [loading, setLoading] = useState(true)
   const [probing, setProbing] = useState(true)
-  const [action, setAction] = useState<'toggle' | 'update' | null>(null)
+  const [action, setAction] = useState<'toggle' | 'update' | 'flowseal-check' | 'manager-check' | 'manager-download' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
@@ -58,6 +61,8 @@ function App() {
   const [autoUpdate, setAutoUpdate] = useState(true)
   const [startWindows, setStartWindows] = useState(true)
   const [backgroundCheck, setBackgroundCheck] = useState(true)
+  const [flowsealChecked, setFlowsealChecked] = useState(false)
+  const [managerUpdate, setManagerUpdate] = useState<ManagerUpdateInfo | null>(null)
   const settingsCloseRef = useRef<HTMLButtonElement>(null)
 
   const runProbe = useCallback(async () => {
@@ -131,7 +136,18 @@ function App() {
     finally { setAction(null) }
   }
 
-  async function update() {
+  async function checkFlowsealUpdate() {
+    setAction('flowseal-check'); setError(null)
+    try {
+      const value = await api.snapshot()
+      setSnapshot((current) => ({ ...value, services: current.services }))
+      setFlowsealChecked(true)
+    }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Не удалось проверить обновление Flowseal') }
+    finally { setAction(null) }
+  }
+
+  async function updateFlowseal() {
     setAction('update'); setError(null)
     try {
       const value = await api.update()
@@ -139,6 +155,23 @@ function App() {
     }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Не удалось установить обновление') }
     finally { setAction(null) }
+  }
+
+  async function handleManagerUpdate() {
+    setError(null)
+    try {
+      if (!managerUpdate || !managerUpdate.available) {
+        setAction('manager-check')
+        setManagerUpdate(await api.checkManagerUpdate())
+      } else if (!managerUpdate.downloaded) {
+        setAction('manager-download')
+        setManagerUpdate(await api.downloadManagerUpdate())
+      } else {
+        await api.installManagerUpdate()
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Не удалось проверить обновление менеджера')
+    } finally { setAction(null) }
   }
 
   async function startTune() {
@@ -268,14 +301,25 @@ function App() {
             <button className="primary-button" onClick={startTune}><Search aria-hidden="true" /> Начать проверку</button>
           </article>
           <article className="update-card">
-            <div className="update-top"><span className="card-overline">ОБНОВЛЕНИЯ</span>{updateReady ? <span className="version-badge">Доступно</span> : <span className="version-badge muted">Актуально</span>}</div>
-            <h2>{updateReady ? `Версия ${snapshot.latestVersion}` : `Версия ${snapshot.version || 'не установлена'}`}</h2>
-            <p>{updateReady ? 'Новые конфиги и улучшения Flowseal готовы к установке.' : 'Конфиги и ядро Flowseal обновлены.'}</p>
-            <button className="text-button" onClick={update} disabled={action !== null}>{action === 'update' ? <LoaderCircle className="spin" /> : <ArrowDownToLine />} {snapshot.installed ? 'Проверить обновления' : 'Установить Zapret'}</button>
+            <div className="update-top"><span className="card-overline">ОБНОВЛЕНИЯ</span><span className="version-badge muted">Вручную</span></div>
+            <div className="update-row">
+              <div><strong>Zapret и конфиги</strong><span>{snapshot.version ? `v${snapshot.version}` : 'Не установлен'}{flowsealChecked && !updateReady ? ' · актуально' : ''}</span></div>
+              <button onClick={updateReady ? updateFlowseal : checkFlowsealUpdate} disabled={action !== null}>
+                {action === 'update' || action === 'flowseal-check' ? <LoaderCircle className="spin" /> : updateReady ? <ArrowDownToLine /> : <RefreshCw />}
+                {updateReady ? 'Обновить' : 'Проверить'}
+              </button>
+            </div>
+            <div className="update-row">
+              <div><strong>Zapret Manager</strong><span>v{__APP_VERSION__}{managerUpdate && !managerUpdate.available ? ' · актуально' : managerUpdate?.available ? ` → v${managerUpdate.latestVersion}` : ''}</span></div>
+              <button onClick={handleManagerUpdate} disabled={action !== null}>
+                {action === 'manager-check' || action === 'manager-download' ? <LoaderCircle className="spin" /> : managerUpdate?.available && !managerUpdate.downloaded ? <ArrowDownToLine /> : managerUpdate?.downloaded ? <RotateCcw /> : <RefreshCw />}
+                {managerUpdate?.downloaded ? 'Перезапустить' : managerUpdate?.available ? 'Скачать' : 'Проверить'}
+              </button>
+            </div>
           </article>
         </section>
 
-        <footer><span>Zapret Manager · {snapshot.version || 'не установлен'}</span><button onClick={() => api.openExternal('https://github.com/Flowseal/zapret-discord-youtube/')}><Github /> Официальный Flowseal <ExternalLink /></button></footer>
+        <footer><span>Zapret Manager · {__APP_VERSION__}</span><button onClick={() => api.openExternal('https://github.com/Flowseal/zapret-discord-youtube/')}><Github /> Официальный Flowseal <ExternalLink /></button></footer>
       </main>
 
       {settingsOpen && (

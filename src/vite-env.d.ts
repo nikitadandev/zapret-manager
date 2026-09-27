@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 declare global {
+const __APP_VERSION__: string
 type ServiceStatus = 'available' | 'slow' | 'unavailable' | 'checking'
 
 interface ServiceProbe {
@@ -42,6 +43,14 @@ interface ManagerSettings {
   backgroundCheck: boolean
 }
 
+interface ManagerUpdateInfo {
+  currentVersion: string
+  latestVersion: string
+  available: boolean
+  downloaded?: boolean
+  developmentMode?: boolean
+}
+
 interface ManagerApi {
   snapshot: () => Promise<AppSnapshot>
   probe: () => Promise<ServiceProbe[]>
@@ -52,6 +61,9 @@ interface ManagerApi {
   cancelTune: () => Promise<boolean>
   getSettings: () => Promise<ManagerSettings>
   updateSettings: (settings: Partial<ManagerSettings>) => Promise<ManagerSettings>
+  checkManagerUpdate: () => Promise<ManagerUpdateInfo>
+  downloadManagerUpdate: () => Promise<ManagerUpdateInfo>
+  installManagerUpdate: () => Promise<boolean>
   openExternal: (url: string) => Promise<void>
   onTuneProgress: (callback: (progress: TuneProgress) => void) => () => void
   onStateChanged: (callback: (snapshot: AppSnapshot) => void) => () => void

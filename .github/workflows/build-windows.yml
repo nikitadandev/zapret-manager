@@ -7,7 +7,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   windows:
@@ -35,5 +35,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: zapret-manager-windows
-          path: release/*.exe
+          path: |
+            release/Zapret-Manager-Setup.exe
+            release/Zapret-Manager-Setup.exe.blockmap
+            release/latest.yml
           if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME "release/Zapret-Manager-Setup.exe#Windows x64 installer" "release/Zapret-Manager-Setup.exe.blockmap" "release/latest.yml" --verify-tag --generate-notes --title "Zapret Manager $env:GITHUB_REF_NAME"

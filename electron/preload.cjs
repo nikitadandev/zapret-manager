@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld('zapretManager', {
   cancelTune: () => ipcRenderer.invoke('manager:cancel-tune'),
   getSettings: () => ipcRenderer.invoke('manager:get-settings'),
   updateSettings: (settings) => ipcRenderer.invoke('manager:update-settings', settings),
+  checkManagerUpdate: () => ipcRenderer.invoke('manager:check-app-update'),
+  downloadManagerUpdate: () => ipcRenderer.invoke('manager:download-app-update'),
+  installManagerUpdate: () => ipcRenderer.invoke('manager:install-app-update'),
   openExternal: (url) => ipcRenderer.invoke('manager:open-external', url),
   onTuneProgress: (callback) => {
     const listener = (_event, value) => callback(value)
