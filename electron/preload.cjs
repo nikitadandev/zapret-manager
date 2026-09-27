@@ -21,6 +21,11 @@ contextBridge.exposeInMainWorld('zapretManager', {
     ipcRenderer.on('manager:tune-progress', listener)
     return () => ipcRenderer.removeListener('manager:tune-progress', listener)
   },
+  onBackgroundError: (callback) => {
+    const listener = (_event, value) => callback(value)
+    ipcRenderer.on('manager:background-error', listener)
+    return () => ipcRenderer.removeListener('manager:background-error', listener)
+  },
   onStateChanged: (callback) => {
     const listener = (_event, value) => callback(value)
     ipcRenderer.on('manager:state-changed', listener)

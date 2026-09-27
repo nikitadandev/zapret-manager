@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, ArrowDownToLine, Check, ChevronDown, CircleHelp, ExternalLink,
-  FolderOpen, Gauge, Github, LoaderCircle, Play, Power, RefreshCw, RotateCcw, Search,
+  FolderOpen, Gauge, Github, LoaderCircle, Power, RefreshCw, RotateCcw, Search,
   Settings, ShieldCheck, Sparkles, Square, WandSparkles, Wifi, X, Zap,
 } from 'lucide-react'
 import { averageLatency as getAverageLatency } from './utils'
@@ -32,7 +32,7 @@ function localApi(): ManagerApi {
     start: async (next) => { await wait(450); running = true; strategy = next || strategy; return snapshot() },
     stop: async () => { await wait(450); running = false; return snapshot() },
     update: async () => { await wait(1200); return snapshot() },
-    autoTune: async () => ({ index: 0, total: 0, strategy: '', phase: 'complete' }),
+    autoTune: async () => ({ index: 1, total: 1, strategy, bestStrategy: strategy, phase: 'complete', results: [{ strategy, score: 99, reachable: 4, averageLatency: 50 }] }),
     cancelTune: async () => true,
     getSettings: async () => ({ autoUpdate: true, startWithWindows: true, backgroundCheck: true }),
     updateSettings: async (settings) => ({ autoUpdate: true, startWithWindows: true, backgroundCheck: true, ...settings }),
@@ -42,6 +42,7 @@ function localApi(): ManagerApi {
     openEngineFolder: async () => defaultSnapshot.enginePath,
     openExternal: async (url) => { window.open(url, '_blank', 'noopener,noreferrer') },
     onTuneProgress: () => () => undefined,
+    onBackgroundError: () => () => undefined,
     onStateChanged: () => () => undefined,
   }
 }
@@ -51,10 +52,10 @@ const api = window.zapretManager || localApi()
 const serviceGlyph: Record<string, string> = { youtube: 'YT', discord: 'DS', github: 'GH', telegram: 'TG' }
 
 function App() {
-  const [snapshot, setSnapshot] = useState<AppSnapshot>(defaultSnapshot)
+  const [snapshot, setSnapshot] = useState<AppSnapshot>(window.zapretManager ? { ...defaultSnapshot, demoMode: false, installed: false, running: false, version: null, latestVersion: null, activeStrategy: null, services: [], strategies: [] } : defaultSnapshot)
   const [loading, setLoading] = useState(true)
   const [probing, setProbing] = useState(true)
-  const [action, setAction] = useState<'toggle' | 'update' | 'flowseal-check' | 'manager-check' | 'manager-download' | null>(null)
+  const [action, setAction] = useState<'toggle' | 'update' | 'flowseal-check' | 'manager-check' | 'manager-download' | 'tune' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
@@ -65,16 +66,20 @@ function App() {
   const [backgroundCheck, setBackgroundCheck] = useState(true)
   const [flowsealChecked, setFlowsealChecked] = useState(false)
   const [managerUpdate, setManagerUpdate] = useState<ManagerUpdateInfo | null>(null)
+  const probePending = useRef(false)
+  const [savingSettings, setSavingSettings] = useState(false)
   const settingsCloseRef = useRef<HTMLButtonElement>(null)
 
   const runProbe = useCallback(async () => {
+    if (probePending.current) return
+    probePending.current = true
     setProbing(true)
     try {
       const services = await api.probe()
       setSnapshot((current) => ({ ...current, services, lastChecked: new Date().toISOString() }))
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Не удалось проверить сервисы')
-    } finally { setProbing(false) }
+    } finally { probePending.current = false; setProbing(false) }
   }, [])
 
   useEffect(() => {
@@ -84,9 +89,16 @@ function App() {
       setSnapshot((current) => ({ ...value, services: current.services }))
     }).catch((reason) => setError(reason.message)).finally(() => setLoading(false))
     runProbe()
-    const timer = window.setInterval(() => { if (backgroundCheck) runProbe() }, 30_000)
-    return () => { alive = false; window.clearInterval(timer) }
-  }, [backgroundCheck, runProbe])
+    return () => { alive = false }
+  }, [runProbe])
+
+  useEffect(() => {
+    if (!backgroundCheck || action === 'tune') return
+    const timer = window.setInterval(runProbe, 30_000)
+    return () => window.clearInterval(timer)
+  }, [backgroundCheck, action, runProbe])
+
+  useEffect(() => api.onBackgroundError(setError), [])
 
   useEffect(() => api.onTuneProgress((progress) => setTune(progress)), [])
 
@@ -109,8 +121,25 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (settingsOpen) requestAnimationFrame(() => settingsCloseRef.current?.focus())
-  }, [settingsOpen])
+    if (!settingsOpen && !tuneOpen) return
+    const previous = document.activeElement as HTMLElement | null
+    const dialog = document.querySelector<HTMLElement>(tuneOpen ? '.tune-dialog' : '.settings-panel')
+    const focusables = () => Array.from(dialog?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]') || [])
+    focusables()[0]?.focus()
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return
+      const items = focusables()
+      const first = items[0], last = items[items.length - 1]
+      if (!first) { event.preventDefault(); return }
+      if (event.shiftKey && (document.activeElement === first || !dialog?.contains(document.activeElement))) {
+        event.preventDefault(); last.focus()
+      } else if (!event.shiftKey && (document.activeElement === last || !dialog?.contains(document.activeElement))) {
+        event.preventDefault(); first.focus()
+      }
+    }
+    document.addEventListener('keydown', trapFocus)
+    return () => { document.removeEventListener('keydown', trapFocus); previous?.focus() }
+  }, [settingsOpen, tuneOpen])
 
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
@@ -122,9 +151,10 @@ function App() {
     return () => document.removeEventListener('keydown', onEscape)
   }, [profileOpen, settingsOpen])
 
-  const healthy = snapshot.services.filter((service) => service.status === 'available').length
+  const healthy = snapshot.services.filter((service) => (service.status === 'available' || service.status === 'slow')).length
   const averageLatency = useMemo(() => getAverageLatency(snapshot.services), [snapshot.services])
-  const updateReady = snapshot.latestVersion && snapshot.version !== snapshot.latestVersion
+  const updateReady = !snapshot.installed || Boolean(snapshot.latestVersion && snapshot.version !== snapshot.latestVersion)
+  const busy = loading || action !== null
 
   async function toggle() {
     setAction('toggle'); setError(null)
@@ -151,6 +181,7 @@ function App() {
     try {
       const value = await api.snapshot()
       setSnapshot((current) => ({ ...value, services: current.services }))
+      if (value.releaseError) throw new Error(value.releaseError)
       setFlowsealChecked(true)
     }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Не удалось проверить обновление Flowseal') }
@@ -185,28 +216,42 @@ function App() {
   }
 
   async function startTune() {
+    if (busy) return
+    setAction('tune')
     setTuneOpen(true)
     setTune({ index: 0, total: snapshot.strategies.length || 8, strategy: 'Подготовка', phase: 'starting' })
     try {
       const result = await api.autoTune()
       setTune(result)
-      if (result.phase === 'complete') setSnapshot(await api.snapshot())
+      const value = await api.status()
+      setSnapshot((current) => ({ ...value, services: current.services }))
+      await runProbe()
     } catch (reason) {
       setTune((current) => ({ ...current, phase: 'error', message: reason instanceof Error ? reason.message : 'Ошибка проверки' }))
-    }
+    } finally { setAction(null) }
   }
 
   async function cancelTune() {
     if (tune.phase === 'complete' || tune.phase === 'error' || tune.phase === 'cancelled') setTuneOpen(false)
-    else await api.cancelTune()
+    else {
+      try { await api.cancelTune() } catch (reason) { setError(String(reason)) }
+    }
   }
 
   async function changeSetting(key: keyof ManagerSettings, value: boolean) {
-    if (key === 'autoUpdate') setAutoUpdate(value)
-    if (key === 'startWithWindows') setStartWindows(value)
-    if (key === 'backgroundCheck') setBackgroundCheck(value)
-    try { await api.updateSettings({ [key]: value }) }
-    catch (reason) { setError(reason instanceof Error ? reason.message : 'Не удалось сохранить настройку') }
+    if (savingSettings) return
+    setSavingSettings(true)
+    try {
+      const settings = await api.updateSettings({ [key]: value })
+      setAutoUpdate(settings.autoUpdate)
+      setStartWindows(settings.startWithWindows)
+      setBackgroundCheck(settings.backgroundCheck)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Не удалось сохранить настройку') }
+    finally { setSavingSettings(false) }
+  }
+
+  function openExternal(url: string) {
+    api.openExternal(url).catch((reason) => setError(String(reason)))
   }
 
   const progress = tune.total ? Math.round((tune.index / tune.total) * 100) : 0
@@ -221,10 +266,10 @@ function App() {
       <aside className="rail" aria-label="Навигация">
         <div className="rail-main">
           <button className="rail-button active" aria-label="Главная" aria-current="page"><Gauge aria-hidden="true" /></button>
-          <button className="rail-button" aria-label="Диагностика" onClick={startTune}><Activity aria-hidden="true" /></button>
+          <button className="rail-button" aria-label="Диагностика" onClick={startTune} disabled={busy}><Activity aria-hidden="true" /></button>
         </div>
         <div className="rail-bottom">
-          <button className="rail-button" aria-label="Помощь" onClick={() => api.openExternal('https://github.com/Flowseal/zapret-discord-youtube/')}><CircleHelp aria-hidden="true" /></button>
+          <button className="rail-button" aria-label="Помощь" onClick={() => openExternal('https://github.com/Flowseal/zapret-discord-youtube/')}><CircleHelp aria-hidden="true" /></button>
           <button className="rail-button" aria-label="Настройки" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(true)}><Settings aria-hidden="true" /></button>
           <div className="avatar" aria-label="Локальный пользователь">Я</div>
         </div>
@@ -260,18 +305,18 @@ function App() {
             <h2>{snapshot.running ? 'Всё подключено' : 'Сейчас выключено'}</h2>
             <p>{snapshot.running ? `Работает конфиг ${snapshot.activeStrategy || 'General'}` : 'Нажмите большую кнопку — остальное сделаем мы.'}</p>
             <div className="hero-actions">
-              <button className={`power-button ${snapshot.running ? 'stop' : ''}`} onClick={toggle} disabled={action !== null}>
+              <button className={`power-button ${snapshot.running ? 'stop' : ''}`} onClick={toggle} disabled={busy}>
                 {action === 'toggle' ? <LoaderCircle className="spin" aria-hidden="true" /> : snapshot.running ? <Square fill="currentColor" aria-hidden="true" /> : <Power aria-hidden="true" />}
                 {snapshot.running ? 'Остановить' : 'Включить'}
               </button>
               <div className="profile-picker">
-                <button className="secondary-button" onClick={() => setProfileOpen((value) => !value)} aria-haspopup="listbox" aria-expanded={profileOpen}>
+                <button className="secondary-button" disabled={busy} onClick={() => setProfileOpen((value) => !value)} aria-haspopup="listbox" aria-expanded={profileOpen}>
                   <span><span className="button-label">Конфиг</span>{snapshot.activeStrategy || 'Выбрать'}</span><ChevronDown aria-hidden="true" />
                 </button>
                 {profileOpen && (
                   <div className="profile-menu" role="listbox" aria-label="Выбор конфига">
                     {snapshot.strategies.map((profile) => (
-                      <button key={profile} role="option" aria-selected={profile === snapshot.activeStrategy} onClick={() => selectProfile(profile)}>
+                      <button key={profile} disabled={busy} role="option" aria-selected={profile === snapshot.activeStrategy} onClick={() => selectProfile(profile)}>
                         <span>{profile}</span>{profile === snapshot.activeStrategy && <Check aria-hidden="true" />}
                       </button>
                     ))}
@@ -287,7 +332,7 @@ function App() {
         </section>
 
         <div className="section-line">
-          <div><h2>Сервисы</h2><p>Проверяем автоматически каждые 30 секунд</p></div>
+          <div><h2>Сервисы</h2><p>{backgroundCheck ? 'Проверяем автоматически каждые 30 секунд' : 'Автоматическая проверка выключена'}</p></div>
           <button className="quiet-button" onClick={runProbe} disabled={probing}><RefreshCw className={probing ? 'spin' : ''} aria-hidden="true" /> Проверить сейчас</button>
         </div>
 
@@ -308,20 +353,20 @@ function App() {
           <article className="smart-card">
             <div className="smart-icon"><WandSparkles aria-hidden="true" /></div>
             <div><span className="card-overline">УМНЫЙ ПОДБОР</span><h2>Найти лучший конфиг</h2><p>Проверим стратегии по очереди и оставим самую быструю для вашего провайдера.</p></div>
-            <button className="primary-button" onClick={startTune}><Search aria-hidden="true" /> Начать проверку</button>
+            <button className="primary-button" onClick={startTune} disabled={busy}><Search aria-hidden="true" /> Начать проверку</button>
           </article>
           <article className="update-card">
             <div className="update-top"><span className="card-overline">ОБНОВЛЕНИЯ</span><span className="version-badge muted">Вручную</span></div>
             <div className="update-row">
-              <div><strong>Zapret и конфиги</strong><span>{snapshot.version ? `v${snapshot.version}` : 'Не установлен'}{flowsealChecked && !updateReady ? ' · актуально' : ''}</span></div>
-              <button onClick={updateReady ? updateFlowseal : checkFlowsealUpdate} disabled={action !== null}>
+              <div><strong>Zapret и конфиги</strong><span>{snapshot.version ? `v${snapshot.version}` : 'Не установлен'}{flowsealChecked && !snapshot.releaseError && !updateReady ? ' · актуально' : ''}</span></div>
+              <button onClick={updateReady ? updateFlowseal : checkFlowsealUpdate} disabled={busy}>
                 {action === 'update' || action === 'flowseal-check' ? <LoaderCircle className="spin" /> : updateReady ? <ArrowDownToLine /> : <RefreshCw />}
-                {updateReady ? 'Обновить' : 'Проверить'}
+                {!snapshot.installed ? 'Установить' : updateReady ? 'Обновить' : 'Проверить'}
               </button>
             </div>
             <div className="update-row">
               <div><strong>Zapret Manager</strong><span>v{__APP_VERSION__}{managerUpdate && !managerUpdate.available ? ' · актуально' : managerUpdate?.available ? ` → v${managerUpdate.latestVersion}` : ''}</span></div>
-              <button onClick={handleManagerUpdate} disabled={action !== null}>
+              <button onClick={handleManagerUpdate} disabled={busy}>
                 {action === 'manager-check' || action === 'manager-download' ? <LoaderCircle className="spin" /> : managerUpdate?.available && !managerUpdate.downloaded ? <ArrowDownToLine /> : managerUpdate?.downloaded ? <RotateCcw /> : <RefreshCw />}
                 {managerUpdate?.downloaded ? 'Перезапустить' : managerUpdate?.available ? 'Скачать' : 'Проверить'}
               </button>
@@ -329,7 +374,7 @@ function App() {
           </article>
         </section>
 
-        <footer><span>Zapret Manager · {__APP_VERSION__}</span><button onClick={() => api.openExternal('https://github.com/Flowseal/zapret-discord-youtube/')}><Github /> Официальный Flowseal <ExternalLink /></button></footer>
+        <footer><span>Zapret Manager · {__APP_VERSION__}</span><button onClick={() => openExternal('https://github.com/Flowseal/zapret-discord-youtube/')}><Github /> Официальный Flowseal <ExternalLink /></button></footer>
       </main>
 
       {settingsOpen && (
@@ -337,13 +382,13 @@ function App() {
           <section className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
             <div className="panel-heading"><div><span className="card-overline">ПРИЛОЖЕНИЕ</span><h2 id="settings-title">Настройки</h2></div><button ref={settingsCloseRef} className="icon-button" onClick={() => setSettingsOpen(false)} aria-label="Закрыть настройки"><X /></button></div>
             <div className="settings-group">
-              <Toggle label="Автообновление" description="Устанавливать свежие конфиги Flowseal" value={autoUpdate} onChange={(value) => changeSetting('autoUpdate', value)} />
-              <Toggle label="Запуск вместе с Windows" description="Подключаться после входа в систему" value={startWindows} onChange={(value) => changeSetting('startWithWindows', value)} />
-              <Toggle label="Фоновая диагностика" description="Проверять сервисы каждые 30 секунд" value={backgroundCheck} onChange={(value) => changeSetting('backgroundCheck', value)} />
+              <Toggle disabled={savingSettings} label="Автообновление" description="Устанавливать свежие конфиги Flowseal" value={autoUpdate} onChange={(value) => changeSetting('autoUpdate', value)} />
+              <Toggle disabled={savingSettings} label="Запуск вместе с Windows" description="Открывать менеджер после входа в систему" value={startWindows} onChange={(value) => changeSetting('startWithWindows', value)} />
+              <Toggle disabled={savingSettings} label="Фоновая диагностика" description="Проверять сервисы каждые 30 секунд" value={backgroundCheck} onChange={(value) => changeSetting('backgroundCheck', value)} />
             </div>
             <div className="source-card"><ShieldCheck /><div><strong>Безопасный источник</strong><span>Ядро загружается только из официального репозитория Flowseal и проверяется по SHA-256.</span></div></div>
-            <button className="panel-link engine-folder" onClick={() => api.openEngineFolder()} title={snapshot.enginePath}><FolderOpen /> Открыть папку Zapret <span>{snapshot.enginePath}</span></button>
-            <button className="panel-link" onClick={() => api.openExternal('https://github.com/Flowseal/zapret-discord-youtube/')}><Github /> Открыть репозиторий <ExternalLink /></button>
+            <button className="panel-link engine-folder" onClick={() => api.openEngineFolder().catch((reason) => setError(String(reason)))} title={snapshot.enginePath}><FolderOpen /> Открыть папку Zapret <span>{snapshot.enginePath}</span></button>
+            <button className="panel-link" onClick={() => openExternal('https://github.com/Flowseal/zapret-discord-youtube/')}><Github /> Открыть репозиторий <ExternalLink /></button>
           </section>
         </div>
       )}
@@ -379,11 +424,11 @@ function Logo() {
   return <span className="logo" aria-hidden="true"><span /><span /><span /></span>
 }
 
-function Toggle({ label, description, value, onChange }: { label: string; description: string; value: boolean; onChange: (value: boolean) => void }) {
+function Toggle({ label, description, value, onChange, disabled }: { disabled?: boolean; label: string; description: string; value: boolean; onChange: (value: boolean) => void }) {
   return (
     <label className="toggle-row">
       <span><strong>{label}</strong><small>{description}</small></span>
-      <input type="checkbox" checked={value} onChange={(event) => onChange(event.target.checked)} />
+      <input type="checkbox" disabled={disabled} checked={value} onChange={(event) => onChange(event.target.checked)} />
       <i aria-hidden="true" />
     </label>
   )

@@ -19,7 +19,9 @@ class ZapretEngine {
   constructor(userDataPath, sendProgress) {
     this.root = path.join(userDataPath, 'flowseal')
     this.stateFile = path.join(userDataPath, 'manager-state.json')
-    this.sendProgress = sendProgress
+    this.sendProgress = sendProgress || (() => {})
+    this.stateWrites = Promise.resolve()
+    this.operation = null
     this.tuneCancelled = false
     this.demoRunning = true
     this.demoStrategy = 'General ALT 7'
@@ -27,31 +29,55 @@ class ZapretEngine {
 
   get isWindows() { return process.platform === 'win32' }
 
-  async readState() {
-    try { return JSON.parse(await fs.readFile(this.stateFile, 'utf8')) }
-    catch { return {} }
+  async exclusive(name, task) {
+    if (this.operation) throw new Error(`Дождитесь завершения операции: ${this.operation}`)
+    this.operation = name
+    try { return await task() } finally { this.operation = null }
   }
 
-  async writeState(patch) {
-    const state = { ...(await this.readState()), ...patch }
-    await fs.mkdir(path.dirname(this.stateFile), { recursive: true })
-    await fs.writeFile(this.stateFile, JSON.stringify(state, null, 2), 'utf8')
-    return state
+  start(strategy) { return this.exclusive('запуск', () => this._start(strategy)) }
+  stop() { return this.exclusive('остановка', () => this._stop()) }
+  update() { return this.exclusive('обновление', () => this._update()) }
+  autoTune() { return this.exclusive('подбор', () => this._autoTune()) }
+
+  async readState() {
+    try {
+      const state = JSON.parse(await fs.readFile(this.stateFile, 'utf8'))
+      return state && typeof state === 'object' && !Array.isArray(state) ? state : {}
+    } catch (error) {
+      if (error.code === 'ENOENT' || error instanceof SyntaxError) return {}
+      throw error
+    }
+  }
+
+  writeState(patch) {
+    const pending = this.stateWrites.then(async () => {
+      const current = await this.readState()
+      const state = { ...current, ...(typeof patch === 'function' ? patch(current) : patch) }
+      await fs.mkdir(path.dirname(this.stateFile), { recursive: true })
+      const temp = `${this.stateFile}.tmp`
+      await fs.writeFile(temp, JSON.stringify(state, null, 2), 'utf8')
+      await fs.rename(temp, this.stateFile)
+      return state
+    })
+    this.stateWrites = pending.catch(() => {})
+    return pending
   }
 
   async getSettings() {
     const state = await this.readState()
     return {
-      autoUpdate: state.settings?.autoUpdate ?? true,
-      startWithWindows: state.settings?.startWithWindows ?? true,
-      backgroundCheck: state.settings?.backgroundCheck ?? true,
+      autoUpdate: typeof state.settings?.autoUpdate === 'boolean' ? state.settings.autoUpdate : true,
+      startWithWindows: typeof state.settings?.startWithWindows === 'boolean' ? state.settings.startWithWindows : true,
+      backgroundCheck: typeof state.settings?.backgroundCheck === 'boolean' ? state.settings.backgroundCheck : true,
     }
   }
 
   async updateSettings(patch) {
-    const settings = { ...(await this.getSettings()), ...patch }
-    await this.writeState({ settings })
-    return settings
+    const allowed = Object.fromEntries(Object.entries(patch || {}).filter(([key, value]) =>
+      ['autoUpdate', 'startWithWindows', 'backgroundCheck'].includes(key) && typeof value === 'boolean'))
+    await this.writeState((state) => ({ settings: { ...state.settings, ...allowed } }))
+    return this.getSettings()
   }
 
   async getRelease() {
@@ -61,8 +87,9 @@ class ZapretEngine {
     })
     if (!response.ok) throw new Error(`GitHub вернул ${response.status}`)
     const release = await response.json()
-    const asset = release.assets.find((item) => item.name.endsWith('.zip'))
+    const asset = release.assets?.find((item) => typeof item.name === 'string' && item.name.toLowerCase().endsWith('.zip'))
     if (!asset) throw new Error('В официальном релизе нет ZIP-архива')
+    if (typeof release.tag_name !== 'string' || !asset.browser_download_url?.startsWith(`https://github.com/${REPOSITORY}/releases/download/`)) throw new Error('Некорректные данные официального релиза')
     return { version: release.tag_name, asset }
   }
 
@@ -88,7 +115,11 @@ class ZapretEngine {
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, { windowsHide: true, ...options })
       let stderr = ''
-      child.stderr?.on('data', (data) => { stderr += data.toString() })
+      child.stdout?.resume()
+      child.stderr?.on('data', (data) => { stderr = (stderr + data.toString()).slice(-12000) })
+      const timer = setTimeout(() => { child.kill(); reject(new Error(`${command}: превышено время ожидания`)) }, 60000)
+      child.once('close', () => clearTimeout(timer))
+      child.once('error', () => clearTimeout(timer))
       child.once('error', reject)
       child.once('close', (code) => code === 0 ? resolve() : reject(new Error(stderr.trim() || `${command}: код ${code}`)))
     })
@@ -97,7 +128,7 @@ class ZapretEngine {
   runStrategyScript(scriptPath) {
     return new Promise((resolve) => {
       const logPath = path.join(this.root, 'manager-launch.log')
-      const command = `call "${scriptPath}" > "${logPath}" 2>&1`
+      const command = `call "${path.basename(scriptPath)}" > "manager-launch.log" 2>&1`
       const child = spawn('cmd.exe', ['/d', '/q', '/c', command], {
         cwd: this.root,
         windowsHide: true,
@@ -113,7 +144,7 @@ class ZapretEngine {
         resolve({ ...result, output })
       }
       const timeout = setTimeout(() => {
-        if (child.pid) spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+        if (child.pid) this.run('taskkill.exe', ['/PID', String(child.pid), '/T', '/F']).catch(() => {})
         finish({ code: null, timedOut: true })
       }, 15000)
       child.once('error', (error) => {
@@ -143,20 +174,41 @@ class ZapretEngine {
     await this.run('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded])
   }
 
+  ownedProcessScript(stop = false) {
+    const executable = path.join(this.root, 'bin', 'winws.exe').replace(/'/g, "''")
+    const select = `$exe = '${executable}'; $owned = @(Get-CimInstance Win32_Process -Filter "Name = 'winws.exe'" -ErrorAction Stop | Where-Object { $_.ExecutablePath -ieq $exe });`
+    if (!stop) return `${select} Write-Output $owned.Count`
+    return `$ErrorActionPreference = 'Stop'; ${select}
+      $service = Get-CimInstance Win32_Service -Filter "Name = 'zapret'";
+      if ($service -and $service.PathName -and ($service.PathName -match ('^\"?' + [regex]::Escape($exe) + '(?:\"|\\s|$)'))) {
+        Stop-Service -Name zapret -ErrorAction Stop
+      }
+      foreach ($ownedProcess in $owned) {
+        $current = Get-Process -Id $ownedProcess.ProcessId -ErrorAction SilentlyContinue
+        if ($current -and $current.Path -ieq $exe) { Stop-Process -Id $current.Id -Force -ErrorAction Stop }
+      }`
+  }
+
   async isRunning() {
     if (!this.isWindows) return this.demoRunning
     const { execFile } = require('node:child_process')
-    return new Promise((resolve) => execFile('tasklist.exe', ['/FI', 'IMAGENAME eq winws.exe', '/NH'], (error, stdout) => resolve(!error && /winws\.exe/i.test(stdout))))
+    const encoded = Buffer.from(this.ownedProcessScript(), 'utf16le').toString('base64')
+    return new Promise((resolve, reject) => execFile('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+      { windowsHide: true, timeout: 10000 }, (error, stdout) => {
+        if (error) reject(new Error(`Не удалось проверить процесс Zapret: ${error.message}`))
+        else resolve(Number(stdout.trim()) > 0)
+      }))
   }
 
   async snapshot(includeRelease = true) {
     const state = await this.readState()
+    let releaseError = null
     let latestVersion = state.latestVersion || null
     if (includeRelease) {
       try {
         latestVersion = (await this.getRelease()).version
         await this.writeState({ latestVersion })
-      } catch { /* Offline is a valid state. */ }
+      } catch (error) { releaseError = error.message }
     }
     const strategies = await this.listStrategies()
     const running = await this.isRunning()
@@ -167,6 +219,7 @@ class ZapretEngine {
       running,
       version: !this.isWindows ? '1.10.3' : state.version || null,
       latestVersion,
+      releaseError,
       activeStrategy: !this.isWindows ? this.demoStrategy : running ? state.activeStrategy || null : null,
       enginePath: this.root,
       strategies,
@@ -185,7 +238,8 @@ class ZapretEngine {
         signal: AbortSignal.timeout(6500),
       })
       const latency = Math.max(1, Math.round(performance.now() - started))
-      const reachable = response.status < 500
+      await response.body?.cancel()
+      const reachable = response.status >= 200 && response.status < 400
       return {
         id: target.id,
         name: target.name,
@@ -210,23 +264,21 @@ class ZapretEngine {
     return Promise.all(SERVICE_TARGETS.map((target) => this.probeOne(target)))
   }
 
-  async stop() {
+  async _stop() {
     if (!this.isWindows) {
       await sleep(450)
       this.demoRunning = false
       return this.snapshot(false)
     }
-    await Promise.allSettled([
-      this.run('taskkill.exe', ['/F', '/IM', 'winws.exe']),
-      this.run('sc.exe', ['stop', 'zapret']),
-    ])
-    await this.waitForRunning(false, 4000)
+    const encoded = Buffer.from(this.ownedProcessScript(true), 'utf16le').toString('base64')
+    await this.run('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded])
+    if (!await this.waitForRunning(false, 4000)) throw new Error('Не удалось остановить winws.exe; проверьте права администратора')
     await this.writeState({ activeStrategy: null })
     await sleep(350)
     return this.snapshot(false)
   }
 
-  async start(strategy) {
+  async _start(strategy) {
     const strategies = await this.listStrategies()
     const selected = strategy || (await this.readState()).activeStrategy || strategies[0]
     if (!selected || !strategies.includes(selected)) throw new Error('Выбранный конфиг не найден')
@@ -238,7 +290,7 @@ class ZapretEngine {
     }
     const scriptPath = path.join(this.root, this.strategyFile(selected))
     if (!fsSync.existsSync(scriptPath)) throw new Error(`Файл конфига отсутствует: ${scriptPath}`)
-    await this.stop()
+    await this._stop()
     const result = await this.runStrategyScript(scriptPath)
     const running = await this.waitForRunning(true)
     if (!running) {
@@ -249,7 +301,36 @@ class ZapretEngine {
     return this.snapshot(false)
   }
 
-  async update() {
+  async readDownload(response) {
+    const limit = 256 * 1024 * 1024
+    if (Number(response.headers.get('content-length')) > limit) {
+      await response.body?.cancel()
+      throw new Error('Архив превышает допустимый размер 256 МБ')
+    }
+    if (!response.body) throw new Error('Пустой ответ при загрузке архива')
+    const chunks = []
+    let size = 0
+    for await (const chunk of response.body) {
+      size += chunk.length
+      if (size > limit) throw new Error('Архив превышает допустимый размер 256 МБ')
+      chunks.push(Buffer.from(chunk))
+    }
+    return Buffer.concat(chunks)
+  }
+
+  async preserveUserLists(destination) {
+    let entries
+    try { entries = await fs.readdir(path.join(this.root, 'lists'), { withFileTypes: true }) }
+    catch (error) { if (error.code === 'ENOENT') return; throw error }
+    await fs.mkdir(path.join(destination, 'lists'), { recursive: true })
+    for (const entry of entries) {
+      if (entry.isFile() && /-user\.txt$/i.test(entry.name)) {
+        await fs.copyFile(path.join(this.root, 'lists', entry.name), path.join(destination, 'lists', entry.name))
+      }
+    }
+  }
+
+  async _update() {
     if (!this.isWindows) {
       await sleep(1300)
       return this.snapshot(false)
@@ -258,13 +339,14 @@ class ZapretEngine {
     const previousState = await this.readState()
     const wasRunning = await this.isRunning()
     const previousStrategy = previousState.activeStrategy
+    if (!/^sha256:[a-f0-9]{64}$/i.test(release.asset.digest || '')) throw new Error('У релиза нет SHA-256; установка отменена')
     const response = await fetch(release.asset.browser_download_url, {
       headers: { 'User-Agent': 'Zapret-Manager' }, signal: AbortSignal.timeout(60000),
     })
     if (!response.ok) throw new Error(`Не удалось скачать релиз: ${response.status}`)
-    const data = Buffer.from(await response.arrayBuffer())
+    const data = await this.readDownload(response)
     const digest = `sha256:${crypto.createHash('sha256').update(data).digest('hex')}`
-    if (release.asset.digest && digest !== release.asset.digest) throw new Error('Контрольная сумма релиза не совпала')
+    if (digest !== release.asset.digest.toLowerCase()) throw new Error('Контрольная сумма релиза не совпала')
 
     const work = `${this.root}.update-${Date.now()}`
     const archive = `${work}.zip`
@@ -276,20 +358,36 @@ class ZapretEngine {
       const entries = await fs.readdir(work, { withFileTypes: true })
       if (entries.length === 1 && entries[0].isDirectory()) source = path.join(work, entries[0].name)
       if (!fsSync.existsSync(path.join(source, 'bin', 'winws.exe'))) throw new Error('Архив не похож на официальный релиз Flowseal')
-      await this.stop()
-      const backup = `${this.root}.backup`
-      await fs.rm(backup, { recursive: true, force: true })
-      if (fsSync.existsSync(this.root)) await fs.rename(this.root, backup)
+      await this.preserveUserLists(source)
+      await this._stop()
+      const backup = `${work}.backup`
+      const hadPrevious = fsSync.existsSync(this.root)
+      if (hadPrevious) {
+        try { await fs.rename(this.root, backup) }
+        catch (error) {
+          if (wasRunning && previousStrategy) await this._start(previousStrategy)
+          throw error
+        }
+      }
       try {
         await fs.rename(source, this.root)
+        await this.writeState({ version: release.version, latestVersion: release.version, activeStrategy: null })
+        const strategies = await this.listStrategies()
+        if (!strategies.length) throw new Error('В архиве нет поддерживаемых конфигов')
+        if (wasRunning) await this._start(strategies.includes(previousStrategy) ? previousStrategy : strategies[0])
       } catch (error) {
-        if (fsSync.existsSync(backup)) await fs.rename(backup, this.root)
+        try {
+          await this._stop()
+          await fs.rm(this.root, { recursive: true, force: true })
+          if (hadPrevious) await fs.rename(backup, this.root)
+          await this.writeState({ version: previousState.version || null, activeStrategy: previousStrategy || null })
+          if (wasRunning && previousStrategy && hadPrevious) await this._start(previousStrategy)
+        } catch (rollbackError) {
+          throw new Error(`${error.message}. Не удалось восстановить сборку: ${rollbackError.message}. Резервная копия: ${backup}`)
+        }
         throw error
       }
       await fs.rm(backup, { recursive: true, force: true })
-      await this.writeState({ version: release.version, latestVersion: release.version, activeStrategy: null })
-      const strategies = await this.listStrategies()
-      if (wasRunning && previousStrategy && strategies.includes(previousStrategy)) return this.start(previousStrategy)
       return this.snapshot(false)
     } finally {
       await fs.rm(work, { recursive: true, force: true })
@@ -297,8 +395,25 @@ class ZapretEngine {
     }
   }
 
-  async autoTune() {
+  async _autoTune() {
     this.tuneCancelled = false
+    const previous = await this.snapshot(false)
+    try {
+      const result = await this.tuneStrategies()
+      if (result.phase !== 'complete') await this.restoreAfterTune(previous)
+      return result
+    } catch (error) {
+      await this.restoreAfterTune(previous)
+      throw error
+    }
+  }
+
+  async restoreAfterTune(previous) {
+    if (previous.running && previous.activeStrategy) await this._start(previous.activeStrategy)
+    else await this._stop()
+  }
+
+  async tuneStrategies() {
     const all = await this.listStrategies()
     const strategies = this.isWindows ? all : all.slice(0, 8)
     const results = []
@@ -311,7 +426,7 @@ class ZapretEngine {
       }
       this.sendProgress({ index: index + 1, total: strategies.length, strategy, phase: 'starting' })
       try {
-        await this.start(strategy)
+        await this._start(strategy)
       } catch (error) {
         results.push({ strategy, score: 0, reachable: 0, averageLatency: null, error: error.message })
         this.sendProgress({ index: index + 1, total: strategies.length, strategy, phase: 'testing', score: 0, message: error.message })
@@ -320,17 +435,20 @@ class ZapretEngine {
       await sleep(this.isWindows ? 1800 : 350)
       this.sendProgress({ index: index + 1, total: strategies.length, strategy, phase: 'testing' })
       const probes = await this.probeServices()
-      const successful = probes.filter((item) => item.status !== 'unavailable')
+      const successful = probes.filter((item) => (item.status === 'available' || item.status === 'slow') && Number.isFinite(item.latency))
       const averageLatency = successful.length ? Math.round(successful.reduce((sum, item) => sum + item.latency, 0) / successful.length) : null
-      const reachability = successful.length / probes.length
+      const reachability = (probes.length ? successful.length / probes.length : 0)
       const speed = averageLatency === null ? 0 : Math.max(0, 1 - averageLatency / 1800)
       const score = Math.round((reachability * 0.78 + speed * 0.22) * 100)
       results.push({ strategy, score, reachable: successful.length, averageLatency })
       this.sendProgress({ index: index + 1, total: strategies.length, strategy, phase: 'testing', score })
     }
-    results.sort((a, b) => b.score - a.score || (a.averageLatency ?? Infinity) - (b.averageLatency ?? Infinity))
+    if (this.tuneCancelled) return { index: strategies.length, total: strategies.length, strategy: '', phase: 'cancelled', results }
+    results.sort((a, b) => b.reachable - a.reachable || b.score - a.score || (a.averageLatency ?? Infinity) - (b.averageLatency ?? Infinity))
     const bestStrategy = results[0]?.score > 0 ? results[0].strategy : null
-    if (bestStrategy) await this.start(bestStrategy)
+    if (!bestStrategy) return { index: strategies.length, total: strategies.length, strategy: '', phase: 'error', message: 'Рабочий конфиг не найден. Проверьте подключение и установку Zapret.', results }
+    await this._start(bestStrategy)
+    if (this.tuneCancelled) return { index: strategies.length, total: strategies.length, strategy: '', phase: 'cancelled', results }
     const progress = { index: strategies.length, total: strategies.length, strategy: bestStrategy, phase: 'complete', bestStrategy, results }
     this.sendProgress(progress)
     return progress

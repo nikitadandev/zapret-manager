@@ -19,6 +19,7 @@ interface AppSnapshot {
   installed: boolean
   running: boolean
   version: string | null
+  releaseError?: string | null
   latestVersion: string | null
   activeStrategy: string | null
   strategies: string[]
@@ -69,6 +70,7 @@ interface ManagerApi {
   openEngineFolder: () => Promise<string>
   openExternal: (url: string) => Promise<void>
   onTuneProgress: (callback: (progress: TuneProgress) => void) => () => void
+  onBackgroundError: (callback: (message: string) => void) => () => void
   onStateChanged: (callback: (snapshot: AppSnapshot) => void) => () => void
 }
 

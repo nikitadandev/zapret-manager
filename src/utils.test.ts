@@ -20,3 +20,14 @@ describe('connection metrics', () => {
     expect(averageLatency(services.map((service) => ({ ...service, latency: null })))).toBeNull()
   })
 })
+
+it('excludes failed HTTP responses even when latency was measured', () => {
+  expect(averageLatency([
+    ...services,
+    { id: 'blocked', name: 'Blocked', host: 'example.com', latency: 900, status: 'unavailable' },
+  ])).toBe(60)
+})
+
+it('counts slow but reachable services as healthy', () => {
+  expect(connectionSummary([{ ...services[0], status: 'slow', latency: 1500 }])).toEqual({ total: 1, healthy: 1, average: 1500 })
+})
